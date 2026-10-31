@@ -49,7 +49,7 @@ DEFAULT_THEME = '经典黑'
 
 def _themes_path():
     base = os.environ.get('APPDATA') or os.path.expanduser('~')
-    d = os.path.join(base, 'SenAICast')
+    d = os.path.join(base, 'SenCast')
     try:
         os.makedirs(d, exist_ok=True)
         p = os.path.join(d, THEMES_FILE)

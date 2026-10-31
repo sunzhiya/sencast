@@ -33,7 +33,7 @@
 
 ## 存在本机的东西
 
-界面设置（背景图、开屏动画、音量档位这些）写在 `%APPDATA%\SenAICast\settings.json`。只写在本机，不联网。
+界面设置（背景图、开屏动画、音量档位这些）写在 `%APPDATA%\SenCast\settings.json`。只写在本机，不联网。
 
 ## 网卡信息
 
@@ -55,7 +55,7 @@
 
 ## 找我
 
-- 提 Issue：<https://github.com/sunzhiya/senai-cast-receiver/issues>
+- 提 Issue：<https://github.com/sunzhiya/sencast/issues>
 - QQ：1218563952
 
 ## 改动

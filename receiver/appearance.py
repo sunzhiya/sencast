@@ -1,7 +1,9 @@
 import json
 import os
+import shutil
 
-APP_DIR = 'SenAICast'
+APP_DIR = 'SenCast'
+OLD_DIR = 'SenAICast'
 FILE = 'settings.json'
 
 DEFAULT = {
@@ -16,8 +18,19 @@ DEFAULT = {
 }
 
 
+def _migrate(base):
+    old = os.path.join(base, OLD_DIR)
+    new = os.path.join(base, APP_DIR)
+    if os.path.isdir(old) and not os.path.isdir(new):
+        try:
+            shutil.copytree(old, new)
+        except Exception:
+            pass
+
+
 def settings_path():
     base = os.environ.get('APPDATA') or os.path.expanduser('~')
+    _migrate(base)
     d = os.path.join(base, APP_DIR)
     try:
         os.makedirs(d, exist_ok=True)

@@ -3,7 +3,7 @@ import ctypes
 import os
 from ctypes import wintypes
 
-MUTEX_NAME = 'Local\\SenAICastReceiver.SingleInstance'
+MUTEX_NAME = 'Local\\SenCastReceiver.SingleInstance'
 WINDOW_TITLE = '森投屏接收端'
 
 ERROR_ALREADY_EXISTS = 183

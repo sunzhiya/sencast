@@ -2,7 +2,7 @@ import os
 import sys
 
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
-VALUE_NAME = 'SenAICastReceiver'
+VALUE_NAME = 'SenCastReceiver'
 
 
 def _is_packaged():

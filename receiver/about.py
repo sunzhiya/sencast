@@ -12,9 +12,9 @@ DONATE_IMG = os.path.join(HERE, 'assets', 'donate.jpg')
 ICON_IMG = os.path.join(HERE, 'assets', 'icon.ico')
 
 QQ = '1218563952'
-GITHUB = 'https://github.com/sunzhiya/senai-cast-receiver'
-ISSUES = 'https://github.com/sunzhiya/senai-cast-receiver/issues'
-PRIVACY = 'https://raw.githubusercontent.com/sunzhiya/senai-cast-receiver/main/PRIVACY.md'
+GITHUB = 'https://github.com/sunzhiya/sencast'
+ISSUES = 'https://github.com/sunzhiya/sencast/issues'
+PRIVACY = 'https://raw.githubusercontent.com/sunzhiya/sencast/main/PRIVACY.md'
 VERSION = '1.3.0'
 
 

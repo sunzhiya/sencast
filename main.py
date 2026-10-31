@@ -95,7 +95,7 @@ def main():
         try:
             import ctypes
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-                'cn.senai.castreceiver')
+                'cn.sencast.receiver')
         except Exception:
             pass
     ip = get_local_ip()

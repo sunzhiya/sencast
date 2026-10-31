@@ -32,7 +32,7 @@ class IptvList:
     @classmethod
     def from_url(cls, url, timeout=15):
         try:
-            req = urllib.request.Request(url, headers={'User-Agent': 'SenAICast/1.2'})
+            req = urllib.request.Request(url, headers={'User-Agent': 'SenCast/1.3'})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 content = resp.read().decode('utf-8', errors='ignore')
         except Exception:
