@@ -1,8 +1,12 @@
 import base64
 import http.server
+import json
+import os
 import re
 import socketserver
 import threading
+import time
+import urllib.parse
 import urllib.request
 import uuid as _uuid
 from xml.sax.saxutils import escape
@@ -13,6 +17,80 @@ from . import ssdp
 
 ICON_PNG = base64.b64decode(
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==')
+
+UPLOAD_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>发送到电脑 · 森投屏</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;min-height:100%}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+background:radial-gradient(120% 90% at 50% 0%,#1d2333 0%,#0d1017 55%,#080a0e 100%);
+color:#eef1f7;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:22px}
+.card{width:100%;max-width:430px;background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.10);
+border-radius:28px;padding:26px 22px 24px;backdrop-filter:blur(22px);box-shadow:0 24px 70px rgba(0,0,0,.55)}
+.logo{width:58px;height:58px;border-radius:19px;margin:0 auto 14px;background:linear-gradient(145deg,#4cc9ff,#6f7bff);
+display:flex;align-items:center;justify-content:center;font-size:27px;font-weight:800;color:#fff;
+box-shadow:0 10px 26px rgba(90,140,255,.45)}
+h1{font-size:20px;margin:0 0 6px;text-align:center;letter-spacing:.5px}
+.sub{text-align:center;font-size:12px;color:#9aa3b5;margin:0 0 22px}
+.pick{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:15px;border-radius:999px;
+background:linear-gradient(135deg,#4cc9ff,#6f7bff);color:#fff;font-size:15px;font-weight:700;letter-spacing:.5px;
+box-shadow:0 12px 30px rgba(80,130,255,.42);cursor:pointer;transition:transform .15s ease,box-shadow .15s ease}
+.pick:active{transform:scale(.97);box-shadow:0 6px 18px rgba(80,130,255,.35)}
+#list{margin-top:20px;display:flex;flex-direction:column;gap:12px}
+.row{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:12px 14px}
+.nm{font-size:13px;color:#e6eaf3;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar{height:6px;border-radius:999px;background:rgba(255,255,255,.14);margin:9px 0 6px;overflow:hidden}
+.bar i{display:block;height:100%;width:0;border-radius:999px;background:linear-gradient(90deg,#4cc9ff,#6f7bff);transition:width .15s ease}
+.pc{font-size:11px;color:#9aa3b5;text-align:right}
+.row.ok{border-color:rgba(60,220,140,.45)}
+.row.ok .pc{color:#4ee39a}
+.row.err{border-color:rgba(255,90,110,.5)}
+.row.err .pc{color:#ff6b7d}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">森</div>
+  <h1>发送到电脑</h1>
+  <p class="sub">同一 Wi-Fi 直连 · 不经过任何服务器</p>
+  <label class="pick"><input id="f" type="file" multiple hidden>选择文件发送</label>
+  <div id="list"></div>
+</div>
+<script>
+var input=document.getElementById('f'),list=document.getElementById('list');
+var queue=[],busy=false;
+input.addEventListener('change',function(){for(var i=0;i<input.files.length;i++){queue.push(input.files[i]);}input.value='';pump();});
+function pump(){if(busy||!queue.length)return;busy=true;upload(queue.shift());}
+function upload(file){
+  var row=document.createElement('div');row.className='row';
+  var nm=document.createElement('div');nm.className='nm';nm.textContent=file.name;
+  var bar=document.createElement('div');bar.className='bar';var fill=document.createElement('i');bar.appendChild(fill);
+  var pc=document.createElement('div');pc.className='pc';pc.textContent='准备中…';
+  row.appendChild(nm);row.appendChild(bar);row.appendChild(pc);list.appendChild(row);
+  var xhr=new XMLHttpRequest();
+  xhr.open('POST','/upload?name='+encodeURIComponent(file.name));
+  xhr.setRequestHeader('Content-Type','application/octet-stream');
+  xhr.upload.onprogress=function(e){
+    if(!e.lengthComputable)return;
+    var p=Math.round(e.loaded*100/e.total);
+    fill.style.width=p+'%';pc.textContent=p+'%';
+  };
+  xhr.onload=function(){
+    if(xhr.status===200){fill.style.width='100%';pc.textContent='完成 ✓';row.classList.add('ok');}
+    else{pc.textContent='失败 ('+xhr.status+')';row.classList.add('err');}
+    busy=false;pump();
+  };
+  xhr.onerror=function(){pc.textContent='失败：网络中断';row.classList.add('err');busy=false;pump();};
+  xhr.send(file);
+}
+</script>
+</body>
+</html>"""
 
 SERVICE_SPECS = {
     'ConnectionManager': {
@@ -186,6 +264,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.server.state.detect_control_point(ua)
         except Exception:
             pass
+        if self.path in ('/', '/index.html', '/send'):
+            self._send(200, UPLOAD_HTML, content_type='text/html; charset="utf-8"')
+            return
         if self.path == '/device.xml':
             self.server.log('[HTTP] %s GET /device.xml (User-Agent: %s)' % (ip, ua))
             if not getattr(self.server, '_diag_http_dumped', False):
@@ -209,6 +290,9 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         self._send(404, '<error>not found</error>')
 
     def do_POST(self):
+        if self.path.startswith('/upload'):
+            self._handle_upload()
+            return
         length = int(self.headers.get('Content-Length', 0) or 0)
         body = self.rfile.read(length) if length else b''
         if self.path.startswith('/upnp/control/'):
@@ -233,6 +317,112 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.server.log('[DLNA] 收到指令 %s %s' % (action, summary))
             return
         self._send(404, '<error>not found</error>')
+
+    def _handle_upload(self):
+        ip = self.client_address[0] if self.client_address else '?'
+        try:
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        except Exception:
+            q = {}
+        raw = (q.get('name') or ['upload.bin'])[0]
+        name = os.path.basename(str(raw).replace('\\', '/')) or 'upload.bin'
+        try:
+            total = int(self.headers.get('Content-Length', 0) or 0)
+        except Exception:
+            total = 0
+        dest_dir = getattr(self.server, 'upload_dir', None) or os.path.join(
+            os.path.expanduser('~'), 'Downloads', '\u68ee\u6295\u5c4f\u63a5\u6536')
+        try:
+            os.makedirs(dest_dir, exist_ok=True)
+        except Exception:
+            pass
+        dest = self._unique_path(dest_dir, name)
+        tmp = dest + '.part'
+        recv = 0
+        t0 = time.time()
+        last_emit = 0.0
+        cb = getattr(self.server, 'upload_progress_cb', None)
+        done_cb = getattr(self.server, 'upload_done_cb', None)
+        try:
+            self.server.log('[文件] 开始接收 %s (%d bytes) <- %s'
+                            % (name, total, ip))
+        except Exception:
+            pass
+        if cb:
+            try:
+                cb(name, 0, '')
+            except Exception:
+                pass
+        ok = False
+        try:
+            with open(tmp, 'wb') as f:
+                while recv < total:
+                    chunk = self.rfile.read(min(65536, total - recv))
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    recv += len(chunk)
+                    now = time.time()
+                    if now - last_emit >= 0.25 or recv >= total:
+                        last_emit = now
+                        elapsed = max(0.001, now - t0)
+                        pct = int(recv * 100 / total) if total else 100
+                        if cb:
+                            try:
+                                cb(name, pct, self._fmt_speed(recv / elapsed))
+                            except Exception:
+                                pass
+            os.replace(tmp, dest)
+            ok = True
+        except Exception as e:
+            try:
+                self.server.log('[文件] 接收失败 %s: %s' % (name, e))
+            except Exception:
+                pass
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
+        if ok:
+            try:
+                self.server.log('[文件] 已保存 %s -> %s' % (name, dest))
+            except Exception:
+                pass
+            if done_cb:
+                try:
+                    done_cb(name, dest)
+                except Exception:
+                    pass
+            self._send(200, json.dumps({'ok': True,
+                                        'name': os.path.basename(dest),
+                                        'path': dest}),
+                       content_type='application/json; charset="utf-8"')
+        else:
+            self._send(500, json.dumps({'ok': False}),
+                       content_type='application/json; charset="utf-8"')
+
+    @staticmethod
+    def _fmt_speed(bps):
+        try:
+            bps = float(bps)
+        except Exception:
+            return ''
+        if bps >= 1024 * 1024:
+            return '%.1f MB/s' % (bps / 1024.0 / 1024.0)
+        if bps >= 1024:
+            return '%.0f KB/s' % (bps / 1024.0)
+        return '%.0f B/s' % bps
+
+    @staticmethod
+    def _unique_path(folder, name):
+        base, ext = os.path.splitext(name)
+        cand = os.path.join(folder, name)
+        i = 1
+        while os.path.exists(cand):
+            cand = os.path.join(folder, '%s (%d)%s' % (base, i, ext))
+            i += 1
+        return cand
 
     def do_SUBSCRIBE(self):
         service = self._service_from_path(self.path)

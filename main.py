@@ -63,11 +63,18 @@ def _setup_media_backend(backend):
 
 def main():
     _install_crash_handler()
-    from receiver.single import acquire, activate_existing, release
+    from receiver.single import (acquire, activate_existing, release,
+                                 force_cleanup_stale)
     if not acquire():
-        activate_existing()
-        print('[启动] 检测到已有一个森投屏接收端在运行，本次启动已退出。')
-        return
+        if activate_existing():
+            print('[启动] 检测到已有实例，已激活其窗口，本次启动退出。')
+            return
+        print('[启动] 上次实例未正常退出，正在强制清理...')
+        if force_cleanup_stale() and acquire():
+            print('[启动] 已清理并接管启动。')
+        else:
+            print('[启动] 既有实例仍在运行，本次启动退出。')
+            return
     ap = argparse.ArgumentParser(description='森投屏接收端 - DLNA/AirPlay 投屏接收')
     ap.add_argument('--name', default=DEFAULT_DEVICE_NAME, help='设备显示名')
     ap.add_argument('--port', type=int, default=DEFAULT_PORT, help='HTTP 控制端口')
@@ -124,6 +131,10 @@ def main():
         st = DlnaStack(current_ip, args.port, args.name, state, log=log_func)
         nets['stack'] = st
         if window is not None:
+            st.http.upload_progress_cb = (
+                lambda n, p, s, w=window: w.upload_progress.emit(n, p, s))
+            st.http.upload_done_cb = (
+                lambda n, p, w=window: w.upload_done.emit(n, p))
             window.stack = st
             window.set_ip_display(current_ip)
             if getattr(window, 'tv_mode', False):
@@ -178,6 +189,11 @@ def main():
     nets['stack'] = stack
     window = MainWindow(stack, bridge, {'ip': ip, 'port': args.port},
                         restart_callback=restart_net)
+    if window is not None:
+        stack.http.upload_progress_cb = (
+            lambda n, p, s: window.upload_progress.emit(n, p, s))
+        stack.http.upload_done_cb = (
+            lambda n, p: window.upload_done.emit(n, p))
 
     if not args.no_splash:
         try:
@@ -239,11 +255,20 @@ def main():
     threading.Thread(target=_firewall_hint, daemon=True).start()
 
     rc = app.exec()
-    if watcher is not None:
-        watcher.stop()
-    stop_net()
-    release()
-    sys.exit(rc)
+    try:
+        if watcher is not None:
+            watcher.stop()
+        stop_net()
+        release()
+    except Exception:
+        pass
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+    except Exception:
+        pass
+    # 强制退出：避免残留线程让进程变僵尸，导致下次启动 mutex/端口不释放
+    os._exit(rc if isinstance(rc, int) else 0)
 
 
 if __name__ == '__main__':

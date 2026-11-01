@@ -1,8 +1,49 @@
-from PyQt6.QtCore import Qt, QTimer, QPoint, QRect
+import os
+
+from PyQt6.QtCore import Qt, QTimer, QPoint
 from PyQt6.QtGui import (QPainter, QColor, QPainterPath, QPen, QFont,
-                         QLinearGradient, QBrush)
+                         QLinearGradient, QBrush, QFontMetrics)
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
                              QPushButton, QSlider, QMenu, QApplication)
+
+
+class TransferBar(QWidget):
+    """圆角自绘进度条。"""
+
+    def __init__(self):
+        super().__init__()
+        self._v = 0
+        self.setFixedHeight(6)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+    def set_value(self, v):
+        v = max(0, min(100, int(v)))
+        if v != self._v:
+            self._v = v
+            self.update()
+
+    def paintEvent(self, ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        r = self.rect()
+        w = float(r.width())
+        h = float(r.height())
+        if w <= 0 or h <= 0:
+            p.end()
+            return
+        rad = h / 2.0
+        bg = QPainterPath()
+        bg.addRoundedRect(0.0, 0.0, w, h, rad, rad)
+        p.fillPath(bg, QColor(255, 255, 255, 40))
+        fw = w * self._v / 100.0
+        if fw > 0.5:
+            fg = QPainterPath()
+            fg.addRoundedRect(0.0, 0.0, fw, h, rad, rad)
+            g = QLinearGradient(0.0, 0.0, max(fw, 1.0), 0.0)
+            g.setColorAt(0.0, QColor(86, 200, 255))
+            g.setColorAt(1.0, QColor(126, 140, 255))
+            p.fillPath(fg, QBrush(g))
+        p.end()
 
 
 class IslandBar(QWidget):
@@ -21,6 +62,15 @@ class IslandBar(QWidget):
         self._opacity = 1.0
         self._compact = False
         self._radius = 23
+        self._fading = False
+        self._fade_dir = 1
+        self._hide_after_fade = False
+        self._transfer_on = False
+        self._transfer_done = False
+        self._last_w = 0
+        self._last_h = 0
+        self._geo_key = None
+
         self._fade_timer = QTimer(self)
         self._fade_timer.setInterval(16)
         self._fade_timer.timeout.connect(self._tick_fade)
@@ -33,11 +83,11 @@ class IslandBar(QWidget):
         root.setContentsMargins(16, 6, 12, 6)
         root.setSpacing(10)
 
-        self.dot = QLabel('●')
+        self.dot = QLabel('\u25cf')
         self.dot.setStyleSheet('color:#39ff88; font-size:13px; background:transparent;')
         root.addWidget(self.dot)
 
-        self.name_label = QLabel('森投屏接收端')
+        self.name_label = QLabel('\u68ee\u6295\u5c4f\u63a5\u6536\u7aef')
         f = QFont()
         f.setPointSize(10)
         f.setBold(True)
@@ -45,7 +95,7 @@ class IslandBar(QWidget):
         self.name_label.setStyleSheet('color:#f2f2f7; background:transparent; letter-spacing:0.5px;')
         root.addWidget(self.name_label)
 
-        self.state_label = QLabel('空闲')
+        self.state_label = QLabel('\u7a7a\u95f2')
         self.state_label.setStyleSheet('color:#9a9aa2; font-size:11px; background:transparent;')
         root.addWidget(self.state_label)
 
@@ -60,8 +110,8 @@ class IslandBar(QWidget):
         ch.setContentsMargins(0, 0, 0, 0)
         ch.setSpacing(8)
 
-        self.btn_play = self._icon_button('▶', '播放 / 暂停', self._toggle_play)
-        self.btn_stop = self._icon_button('■', '停止', self._stop)
+        self.btn_play = self._icon_button('\u25b6', '\u64ad\u653e / \u6682\u505c', self._toggle_play)
+        self.btn_stop = self._icon_button('\u25a0', '\u505c\u6b62', self._stop)
         ch.addWidget(self.btn_play)
         ch.addWidget(self.btn_stop)
 
@@ -83,12 +133,35 @@ class IslandBar(QWidget):
             'background:#ffffff;border-radius:5px;}')
         root.addWidget(self.vol)
 
-        self.btn_more = self._icon_button('⋯', '更多', self._show_more)
+        self.btn_more = self._icon_button('\u22ef', '\u66f4\u591a', self._show_more)
         root.addWidget(self.btn_more)
 
         root.addSpacing(4)
-        self.btn_hide = self._icon_button('—', '隐藏（收进托盘）', self._hide_to_tray)
+        self.btn_hide = self._icon_button('\u2014', '\u9690\u85cf\uff08\u6536\u8fdb\u6258\u76d8\uff09', self._hide_to_tray)
         root.addWidget(self.btn_hide)
+
+        # ---- 文件传输模式控件（默认隐藏） ----
+        self.transfer_box = QWidget()
+        self.transfer_box.setStyleSheet('background:transparent;')
+        tv = QVBoxLayout(self.transfer_box)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(3)
+
+        self.t_name = QLabel('')
+        self.t_name.setStyleSheet(
+            'color:#f2f2f7; font-size:11px; font-weight:600; background:transparent;')
+        tv.addWidget(self.t_name)
+
+        self.t_bar = TransferBar()
+        tv.addWidget(self.t_bar)
+
+        self.t_sub = QLabel('')
+        self.t_sub.setStyleSheet(
+            'color:#9a9aa2; font-size:10px; background:transparent;')
+        tv.addWidget(self.t_sub)
+
+        self.transfer_box.setVisible(False)
+        root.addWidget(self.transfer_box, 1)
 
         self.setVisible(True)
 
@@ -137,13 +210,14 @@ class IslandBar(QWidget):
         super().mousePressEvent(ev)
 
     def enterEvent(self, ev):
-        if self._compact:
+        if self._compact and not self._transfer_on:
             self.set_compact(False)
         super().enterEvent(ev)
 
     def leaveEvent(self, ev):
         try:
-            if self.main is not None and self.main.player.is_playing() and not self.underMouse():
+            if (not self._transfer_on and self.main is not None
+                    and self.main.player.is_playing() and not self.underMouse()):
                 self.set_compact(True)
         except Exception:
             pass
@@ -167,70 +241,115 @@ class IslandBar(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         r = self.rect().adjusted(1, 1, -1, -1)
+        w = float(r.width())
+        h = float(r.height())
+        if w <= 0 or h <= 0:
+            p.end()
+            return
+        radius = min(w, h) / 2.0
         path = QPainterPath()
-        path.addRoundedRect(float(r.left()), float(r.top()),
-                            float(r.width()), float(r.height()),
-                            float(self._radius), float(self._radius))
+        path.addRoundedRect(float(r.left()), float(r.top()), w, h, radius, radius)
 
-        grad = QLinearGradient(0, float(r.top()), 0, float(r.bottom()))
-        grad.setColorAt(0.0, QColor(46, 46, 56, int(222 * self._opacity)))
-        grad.setColorAt(0.55, QColor(26, 26, 33, int(226 * self._opacity)))
-        grad.setColorAt(1.0, QColor(16, 16, 21, int(230 * self._opacity)))
+        grad = QLinearGradient(0.0, float(r.top()), 0.0, float(r.bottom()))
+        grad.setColorAt(0.0, QColor(58, 58, 70, int(234 * self._opacity)))
+        grad.setColorAt(0.45, QColor(30, 30, 38, int(238 * self._opacity)))
+        grad.setColorAt(1.0, QColor(13, 13, 18, int(243 * self._opacity)))
         p.fillPath(path, QBrush(grad))
 
-        p.setPen(QPen(QColor(255, 255, 255, int(40 * self._opacity)), 1))
+        p.setPen(QPen(QColor(255, 255, 255, int(48 * self._opacity)), 1))
         p.drawPath(path)
 
-        hl = QPainterPath()
-        hl.addRoundedRect(float(r.left()) + 12, float(r.top()) + 1.0,
-                          float(r.width()) - 24, float(r.height()) - 2.0,
-                          float(self._radius - 2), float(self._radius - 2))
-        p.setPen(QPen(QColor(255, 255, 255, int(16 * self._opacity)), 1))
-        p.drawPath(hl)
+        inset = 2.0
+        if w > inset * 2 and h > 2.0:
+            hl = QPainterPath()
+            hl.addRoundedRect(float(r.left()) + inset, float(r.top()) + 1.0,
+                              w - inset * 2, h - 2.0,
+                              max(1.0, radius - inset), max(1.0, radius - inset))
+            p.setPen(QPen(QColor(255, 255, 255, int(20 * self._opacity)), 1))
+            p.drawPath(hl)
         p.end()
 
-    def _tick_fade(self):
-        if self._opacity < 1.0:
-            self._opacity = min(1.0, self._opacity + 0.16)
-            self.update()
-        if self._opacity >= 1.0:
-            self._opacity = 1.0
-            self._fade_timer.stop()
+    # ---------- 淡入淡出（状态机，防重入） ----------
 
-    def fade_in(self):
-        self.setVisible(True)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
-        self._opacity = 0.15
-        self._fade_timer.start()
-        try:
-            self.raise_()
-        except Exception:
-            pass
+    def _tick_fade(self):
+        if self._fade_dir > 0:
+            self._opacity = min(1.0, self._opacity + 0.14)
+            if self._opacity >= 1.0:
+                self._opacity = 1.0
+                self._fading = False
+                self._fade_timer.stop()
+        else:
+            self._opacity = max(0.0, self._opacity - 0.16)
+            if self._opacity <= 0.01:
+                self._opacity = 0.0
+                self._fading = False
+                self._fade_timer.stop()
+                if self._hide_after_fade:
+                    self._hide_after_fade = False
+                    self.hide()
         self.update()
 
+    def fade_in(self):
+        if self._fading and self._fade_dir > 0:
+            return
+        was_hidden = not self.isVisible()
+        if was_hidden:
+            self.setVisible(True)
+            try:
+                self.raise_()
+            except Exception:
+                pass
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self._fade_dir = 1
+        self._fading = True
+        if self._opacity < 0.99:
+            self._opacity = 0.18
+        self._fade_timer.start()
+        self.update()
+
+    def fade_out(self, hide_after=True):
+        if not self.isVisible():
+            return
+        self._fade_dir = -1
+        self._fading = True
+        self._hide_after_fade = hide_after
+        self._fade_timer.start()
+
     def show_at_top(self):
-        if not self._eligible():
-            self.hide()
+        if self.main is None:
             return
         self.reposition()
         self.fade_in()
 
+    def _stop_fade(self):
+        self._fading = False
+        self._fade_timer.stop()
+
     def _eligible(self):
-        mw = self.main
-        if mw is None:
-            return False
-        return mw.isVisible() and not mw.isMinimized()
+        # 只要应用还在，灵动岛就常驻前台，不因主窗口最小化/收托盘而消失
+        return self.main is not None
 
     def guard(self):
-        if not self._eligible():
+        if self._transfer_on:
+            return
+        if self.main is None:
             if self.isVisible():
                 self.hide()
             return
         if not self.isVisible():
             self.show_at_top()
             return
+        # 屏幕几何（换显示器/改分辨率/DPI）变化时自适应重新居中
+        geo = self._screen_geo()
+        if geo is not None:
+            key = (geo.x(), geo.y(), geo.width(), geo.height())
+            if key != self._geo_key:
+                self._geo_key = key
+                self.reposition()
 
     def set_compact(self, on):
+        if self._transfer_on:
+            return
         if self._compact == on:
             return
         self._compact = on
@@ -242,9 +361,93 @@ class IslandBar(QWidget):
         self.reposition()
         self.update()
 
+    # ---------- 文件传输模式 ----------
+
+    def begin_transfer(self, filename):
+        self._transfer_on = True
+        self._transfer_done = False
+        self._compact = False
+        for w in (self.dot, self.name_label, self.state_label, self.stretch,
+                  self.ctrl, self.vol, self.btn_more, self.btn_hide):
+            w.setVisible(False)
+        self.transfer_box.setVisible(True)
+        self.t_name.setText(self._elide(filename, 34))
+        self.t_bar.set_value(0)
+        self.t_sub.setText('0%   \u51c6\u5907\u4e2d\u2026')
+        self._radius = 33
+        self.setFixedHeight(66)
+        if not self.isVisible():
+            self.setVisible(True)
+        self.reposition()
+        try:
+            self.raise_()
+        except Exception:
+            pass
+        self._opacity = 1.0
+        self.update()
+
+    def update_transfer(self, filename, percent, speed_text=''):
+        self._transfer_on = True
+        self.t_name.setText(self._elide(filename, 34))
+        self.t_bar.set_value(percent)
+        sub = '%d%%' % int(percent)
+        if speed_text:
+            sub += '   ' + speed_text
+        self.t_sub.setText(sub)
+        self.update()
+
+    def finish_transfer(self, filename, saved_path):
+        self._transfer_done = True
+        base = os.path.basename(filename) or filename
+        self.t_name.setText('\u5df2\u5b8c\u6210 \u00b7 ' + self._elide(base, 30))
+        self.t_bar.set_value(100)
+        self.t_sub.setText('\u6b63\u5728\u6253\u5f00\u6587\u4ef6\u6240\u5728\u4f4d\u7f6e\u2026')
+        self._radius = 33
+        self.setFixedHeight(66)
+        self.reposition()
+        self._opacity = 1.0
+        self.update()
+        QTimer.singleShot(2400, self._end_transfer)
+
+    def _end_transfer(self):
+        if not self._transfer_on:
+            return
+        self._transfer_on = False
+        self._transfer_done = False
+        self.transfer_box.setVisible(False)
+        for w in (self.dot, self.name_label, self.state_label, self.stretch,
+                  self.ctrl, self.vol, self.btn_more, self.btn_hide):
+            w.setVisible(True)
+        self._radius = 23
+        self.setFixedHeight(46)
+        self.reposition()
+        self._opacity = 1.0
+        self.update()
+        self.fade_out(hide_after=True)
+
+    @staticmethod
+    def _elide(text, maxc):
+        if not text:
+            return ''
+        if len(text) <= maxc:
+            return text
+        return text[:maxc - 1] + '\u2026'
+
+    # ---------- 布局 ----------
+
     def _screen_geo(self):
         try:
-            scr = self.main.screen() if self.main is not None else None
+            scr = None
+            mw = self.main
+            if mw is not None:
+                try:
+                    if mw.isVisible() and not mw.isMinimized():
+                        scr = mw.screen()
+                except Exception:
+                    scr = None
+            if scr is None:
+                from PyQt6.QtGui import QCursor
+                scr = QApplication.screenAt(QCursor.pos())
             if scr is None:
                 scr = QApplication.primaryScreen()
             return scr.availableGeometry()
@@ -254,22 +457,32 @@ class IslandBar(QWidget):
     def reposition(self):
         mw = self.main
         try:
-            if mw is None or not mw.isVisible() or mw.isMinimized():
+            if mw is None:
                 return
-            h = 30 if self._compact else 46
+            if self._transfer_on:
+                h = 66
+            else:
+                h = 30 if self._compact else 46
             geo = self._screen_geo()
+            if self._transfer_on:
+                w = 460
+            elif self._compact:
+                w = 150
+            else:
+                w = min(560, max(460, int((geo.width() if geo else 900) * 0.42)))
             if geo is not None:
-                w = 150 if self._compact else min(560, max(460, int(geo.width() * 0.42)))
                 x = geo.center().x() - w // 2
                 y = geo.top() + 10
             else:
-                w = 150 if self._compact else 520
                 tl = mw.mapToGlobal(QPoint(0, 0))
                 x = tl.x() + (mw.width() - w) // 2
                 y = tl.y() + 8
-            self.setFixedWidth(w)
-            self.setGeometry(x, y, w, h)
-            self.raise_()
+            if w != self._last_w or h != self._last_h:
+                self._last_w = w
+                self._last_h = h
+                self.setFixedWidth(w)
+                self.setFixedHeight(h)
+            self.move(x, y)
             self.update()
         except Exception:
             pass
@@ -279,7 +492,7 @@ class IslandBar(QWidget):
         self.dot.setStyleSheet(
             'color:%s; font-size:13px; background:transparent;'
             % ('#39ff88' if playing else '#8a8a92'))
-        self.btn_play.setText('⏸' if playing else '▶')
+        self.btn_play.setText('\u23f8' if playing else '\u25b6')
 
     def set_time(self, text):
         self.time_label.setText(text)

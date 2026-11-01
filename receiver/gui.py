@@ -24,10 +24,15 @@ SELF_TEST_URL = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/samp
 class MainWindow(QMainWindow):
     ip_auto_switch = pyqtSignal(str)
     log_signal = pyqtSignal(str)
+    upload_progress = pyqtSignal(str, int, str)
+    upload_done = pyqtSignal(str, str)
 
     def __init__(self, stack, bridge, info, restart_callback=None):
         super().__init__()
         self.log_signal.connect(self._do_append_log)
+        self.upload_progress.connect(self._on_upload_progress)
+        self.upload_done.connect(self._on_upload_done)
+        self._upload_active = False
         self.stack = stack
         self.bridge = bridge
         self.info = info
@@ -1416,6 +1421,40 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _on_upload_progress(self, name, percent, speed_text):
+        try:
+            if getattr(self, 'island', None) is None:
+                return
+            if not getattr(self, '_upload_active', False):
+                self._upload_active = True
+                self.island.begin_transfer(name)
+            self.island.update_transfer(name, percent, speed_text)
+        except Exception:
+            pass
+
+    def _on_upload_done(self, name, saved_path):
+        try:
+            self._upload_active = False
+            if getattr(self, 'island', None) is not None:
+                self.island.finish_transfer(name, saved_path)
+        except Exception:
+            pass
+        self._reveal_file(saved_path)
+        self.append_log('[文件] 已接收并保存: %s' % saved_path)
+
+    @staticmethod
+    def _reveal_file(path):
+        try:
+            if os.name == 'nt':
+                subprocess.Popen(['explorer', '/select,', os.path.normpath(path)])
+                return
+            subprocess.Popen(['xdg-open', os.path.dirname(path)])
+        except Exception:
+            try:
+                os.startfile(os.path.dirname(path))
+            except Exception:
+                pass
+
     def bring_to_front(self):
         try:
             if self.isMinimized():
@@ -1503,6 +1542,47 @@ class MainWindow(QMainWindow):
             pass
         super().changeEvent(ev)
 
+    def open_transfer_qr(self):
+        try:
+            ip = self.stack.http.app_ip
+            port = self.stack.http.app_port
+        except Exception:
+            ip = self.info.get('ip', '')
+            port = self.info.get('port', 8200)
+        url = 'http://%s:%d/' % (ip, port)
+        dlg = QDialog(self)
+        dlg.setWindowTitle('手机传文件 · 扫码发送')
+        dlg.resize(380, 470)
+        v = QVBoxLayout(dlg)
+        v.addWidget(QLabel('<b>手机扫码，把文件直接发到这台电脑</b>'))
+        v.addWidget(QLabel('同一 Wi-Fi 下点对点直传，不经过任何服务器'))
+        qr_label = QLabel('', dlg)
+        qr_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        try:
+            from qrcode import make as qrcode_make
+            img = qrcode_make(url)
+            buf = io.BytesIO()
+            img.save(buf, format='PNG')
+            pm = QPixmap()
+            pm.loadFromData(buf.getvalue())
+            qr_label.setPixmap(pm.scaled(220, 220, Qt.AspectRatioMode.KeepAspectRatio))
+        except Exception:
+            qr_label.setText('（二维码库不可用，请手动输入下方地址）')
+        v.addWidget(qr_label, 0, Qt.AlignmentFlag.AlignCenter)
+        ue = QLineEdit(url)
+        ue.setReadOnly(True)
+        ue.selectAll()
+        v.addWidget(ue)
+        tip = QLabel('发送后电脑顶部灵动岛会实时显示文件名与进度，'
+                     '完成后自动打开文件所在位置。')
+        tip.setWordWrap(True)
+        v.addWidget(tip)
+        v.addStretch()
+        b = QPushButton('完成')
+        b.clicked.connect(dlg.accept)
+        v.addWidget(b)
+        dlg.exec()
+
     def populate_more_menu(self, menu):
         def add_action(text, slot, enabled=True):
             a = menu.addAction(text)
@@ -1511,6 +1591,9 @@ class MainWindow(QMainWindow):
             return a
 
         add_action('自测播放', lambda: self.on_play(SELF_TEST_URL, '自测视频'))
+        menu.addSeparator()
+        add_action('手机传文件（扫码）', self.open_transfer_qr)
+        menu.addSeparator()
 
         m_pic = menu.addMenu('画质')
         for name in self.player.available_presets():
