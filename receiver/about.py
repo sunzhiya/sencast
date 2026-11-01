@@ -184,6 +184,46 @@ def build_about(parent, on_theme=None, on_appearance=None):
     ts.addStretch()
     tabs.addTab(tab_skin, '皮肤与定制')
 
+    tab_thanks = QWidget()
+    tt = QVBoxLayout(tab_thanks)
+    tt.addWidget(QLabel(
+        '<div style="line-height:160%%;">'
+        '这软件站在下面这些项目上，感谢它们。<br>'
+        '点名字能跳到各自主页。'
+        '</div>'))
+    tt.addSpacing(8)
+
+    def _thanks(name, who, what, url):
+        r = QHBoxLayout()
+        lab = QLabel(
+            '<a href="%s" style="color:#3f8cff;text-decoration:none;">'
+            '<b>%s</b></a>&nbsp;&nbsp;<span style="color:#888;">%s</span>'
+            '&nbsp;—&nbsp;%s' % (url, name, who, what))
+        lab.setOpenExternalLinks(True)
+        lab.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+        r.addWidget(lab)
+        r.addStretch()
+        tt.addLayout(r)
+
+    _thanks('PyQt6', 'Riverbank Computing', 'Qt6 的 Python 绑定，整个界面靠它',
+            'https://www.riverbankcomputing.com/software/pyqt/')
+    _thanks('Qt Multimedia', 'The Qt Company', '播放引擎',
+            'https://www.qt.io/')
+    _thanks('FFmpeg', 'FFmpeg 团队', 'Qt Multimedia 内置解码，支持 m3u8 / ts / mp4 / mkv',
+            'https://ffmpeg.org/')
+    _thanks('NumPy', '', '画质增强的数值计算',
+            'https://numpy.org/')
+    _thanks('qrcode', '', '手机连通性自检的二维码',
+            'https://github.com/lincolnloop/python-qrcode')
+    _thanks('Pillow', '', '二维码图片生成',
+            'https://python-pillow.org/')
+    _thanks('pylnk3', '', '生成 Windows 快捷方式',
+            'https://github.com/strayge/pylnk3')
+    _thanks('cryptography', 'pyca', 'AirPlay 配对的加密握手',
+            'https://cryptography.io/')
+    tt.addStretch()
+    tabs.addTab(tab_thanks, '致谢')
+
     foot = QHBoxLayout()
     b_privacy = QPushButton('隐私政策')
     b_privacy.clicked.connect(lambda: _open(PRIVACY))
