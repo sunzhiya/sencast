@@ -110,17 +110,36 @@ class MainWindow(QMainWindow):
         self.append_log('[托盘] 已收进托盘，后台继续接收投屏')
 
     def _quit_app(self):
+        # 暴力退出：不等 Qt 事件循环、不等残留线程，直接清锁 + 杀光相关进程
         self._really_quit = True
-        self.close()
+        try:
+            if getattr(self, '_tray', None) is not None:
+                self._tray.hide()
+        except Exception:
+            pass
+        try:
+            self.hide()
+        except Exception:
+            pass
+        from .killswitch import hard_exit
+        hard_exit(0)
 
     def closeEvent(self, event):
         if getattr(self, '_really_quit', False):
             if getattr(self, '_tray', None) is not None:
                 self._tray.hide()
             event.accept()
+            # 窗口关闭后若事件循环没及时返回，兜底硬退
+            from PyQt6.QtCore import QTimer
+            from .killswitch import hard_exit
+            QTimer.singleShot(800, lambda: hard_exit(0))
             return
         if getattr(self, '_tray', None) is None:
             event.accept()
+            # 关主窗口即彻底退出，别让 Qt 把进程留在后台
+            from PyQt6.QtCore import QTimer
+            from .killswitch import hard_exit
+            QTimer.singleShot(800, lambda: hard_exit(0))
             return
         event.ignore()
         self.hide()

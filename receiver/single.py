@@ -118,6 +118,12 @@ def force_cleanup_stale():
     if not old or old == os.getpid():
         return True
     if _pid_alive(old):
+        # 暴力清场：旧实例 + 它拉起的整棵子进程树，一起端掉
+        try:
+            from receiver.killswitch import nuke
+            nuke(root_pid=old)
+        except Exception:
+            pass
         ok = _kill_pid(old)
         if not ok:
             return False

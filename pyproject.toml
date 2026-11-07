@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sencast"
-version = "1.4.0"
+version = "1.4.1"
 description = "Windows 上的 DLNA/AirPlay/IPTV/华为多屏投屏接收端：手机视频 App 一键投到电脑播放"
 readme = "README.md"
 requires-python = ">=3.10"

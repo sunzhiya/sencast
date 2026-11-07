@@ -63,6 +63,12 @@ def _setup_media_backend(backend):
 
 def main():
     _install_crash_handler()
+    # 越早越好：把本进程及此后所有子进程关进「退出即全杀」的 Job
+    try:
+        from receiver.killswitch import arm
+        arm()
+    except Exception:
+        pass
     from receiver.single import (acquire, activate_existing, release,
                                  force_cleanup_stale)
     if not acquire():
@@ -260,6 +266,12 @@ def main():
             watcher.stop()
         stop_net()
         release()
+    except Exception:
+        pass
+    # 兜底：任何非托盘路径退出，也把相关进程清干净
+    try:
+        from receiver.killswitch import nuke
+        nuke()
     except Exception:
         pass
     try:
