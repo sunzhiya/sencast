@@ -343,6 +343,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         last_emit = 0.0
         cb = getattr(self.server, 'upload_progress_cb', None)
         done_cb = getattr(self.server, 'upload_done_cb', None)
+        fail_cb = getattr(self.server, 'upload_fail_cb', None)
         try:
             self.server.log('[文件] 开始接收 %s (%d bytes) <- %s'
                             % (name, total, ip))
@@ -372,8 +373,13 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                                 cb(name, pct, self._fmt_speed(recv / elapsed))
                             except Exception:
                                 pass
-            os.replace(tmp, dest)
-            ok = True
+            # 客户端中途断开 / 不给 Content-Length 时，read 会提前返回空，
+            # 此时绝不能把残缺的 .part 改名成成品并回报成功
+            if total > 0 and recv >= total:
+                os.replace(tmp, dest)
+                ok = True
+            else:
+                raise IOError('接收不完整 %d/%d 字节' % (recv, total))
         except Exception as e:
             try:
                 self.server.log('[文件] 接收失败 %s: %s' % (name, e))
@@ -399,6 +405,12 @@ class _Handler(http.server.BaseHTTPRequestHandler):
                                         'path': dest}),
                        content_type='application/json; charset="utf-8"')
         else:
+            # 必须通知 GUI 收起传输态，否则灵动岛会永远卡在「传输中」
+            if fail_cb:
+                try:
+                    fail_cb(name, '传输中断，文件未保存')
+                except Exception:
+                    pass
             self._send(500, json.dumps({'ok': False}),
                        content_type='application/json; charset="utf-8"')
 

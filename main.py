@@ -141,6 +141,8 @@ def main():
                 lambda n, p, s, w=window: w.upload_progress.emit(n, p, s))
             st.http.upload_done_cb = (
                 lambda n, p, w=window: w.upload_done.emit(n, p))
+            st.http.upload_fail_cb = (
+                lambda n, r, w=window: w.upload_fail.emit(n, r))
             window.stack = st
             window.set_ip_display(current_ip)
             if getattr(window, 'tv_mode', False):
@@ -200,6 +202,8 @@ def main():
             lambda n, p, s: window.upload_progress.emit(n, p, s))
         stack.http.upload_done_cb = (
             lambda n, p: window.upload_done.emit(n, p))
+        stack.http.upload_fail_cb = (
+            lambda n, r: window.upload_fail.emit(n, r))
 
     if not args.no_splash:
         try:

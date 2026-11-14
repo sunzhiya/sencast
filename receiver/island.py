@@ -1,8 +1,9 @@
 import os
+import time
 
-from PyQt6.QtCore import Qt, QTimer, QPoint
+from PyQt6.QtCore import Qt, QTimer, QPoint, QRect
 from PyQt6.QtGui import (QPainter, QColor, QPainterPath, QPen, QFont,
-                         QLinearGradient, QBrush, QFontMetrics)
+                         QLinearGradient, QBrush, QFontMetrics, QCursor)
 from PyQt6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QLabel,
                              QPushButton, QSlider, QMenu, QApplication)
 
@@ -61,15 +62,20 @@ class IslandBar(QWidget):
 
         self._opacity = 1.0
         self._compact = False
-        self._radius = 23
         self._fading = False
         self._fade_dir = 1
         self._hide_after_fade = False
         self._transfer_on = False
         self._transfer_done = False
+        self._transfer_seq = 0        # 传输序号：旧文件的完成定时器不能掐掉新文件
         self._last_w = 0
         self._last_h = 0
         self._geo_key = None
+        # 单一目标状态机：所有外部调用只改状态，显隐统一由 guard() 裁决
+        self._cast_mode = False        # 观影态（播放 / 暂停 / 全屏）
+        self._wake_until = 0.0        # 临时唤醒截止时间（顶部热区 / 主动叫窗口）
+        self._suppress_until = 0.0    # 传输完成后的静默期
+        self._cast_override_until = 0.0  # 停止后短暂屏蔽播放器异步状态回落
 
         self._fade_timer = QTimer(self)
         self._fade_timer.setInterval(16)
@@ -290,10 +296,14 @@ class IslandBar(QWidget):
         self.update()
 
     def fade_in(self):
-        if self._fading and self._fade_dir > 0:
+        self._hide_after_fade = False
+        if self.isVisible() and self._fading and self._fade_dir > 0:
             return
         was_hidden = not self.isVisible()
         if was_hidden:
+            # 从当前透明度接着渐入，别每次硬重置造成闪烁
+            if self._opacity < 0.05:
+                self._opacity = 0.18
             self.setVisible(True)
             try:
                 self.raise_()
@@ -302,50 +312,135 @@ class IslandBar(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
         self._fade_dir = 1
         self._fading = True
-        if self._opacity < 0.99:
-            self._opacity = 0.18
         self._fade_timer.start()
         self.update()
 
     def fade_out(self, hide_after=True):
+        if self._fading and self._fade_dir < 0:
+            return
         if not self.isVisible():
+            self._opacity = 0.0
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             return
         self._fade_dir = -1
         self._fading = True
         self._hide_after_fade = hide_after
+        # 淡出期间不再拦截鼠标点击
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._fade_timer.start()
 
     def show_at_top(self):
-        if self.main is None:
-            return
-        self.reposition()
-        self.fade_in()
+        # 兼容旧调用：不再无条件显示，交给状态机裁决
+        self.guard()
 
     def _stop_fade(self):
         self._fading = False
         self._fade_timer.stop()
 
-    def _eligible(self):
-        # 只要应用还在，灵动岛就常驻前台，不因主窗口最小化/收托盘而消失
-        return self.main is not None
+    # ---------- 目标状态机 ----------
+
+    def set_cast_mode(self, on):
+        """进入/退出观影态。观影态下岛自动隐藏，避免挡住视频画面。"""
+        on = bool(on)
+        if self._cast_mode == on:
+            return
+        self._cast_mode = on
+        if on:
+            self._wake_until = 0.0
+            self._cast_override_until = 0.0
+        else:
+            # 停止播放后播放器状态可能异步回落（还报 playing），
+            # 短暂屏蔽兜底判定，让岛立刻回到常驻而不是再藏 350ms
+            self._cast_override_until = time.monotonic() + 0.8
+        self.guard()
+
+    def wake(self, seconds=2.5):
+        """主动叫窗口 / 顶部热区：临时唤出，超时自动收回。"""
+        self._wake_until = time.monotonic() + seconds
+        self.guard()
+
+    def _playing_now(self):
+        """兜底：即使上层忘了通知，也自己看一眼播放器与全屏状态。"""
+        try:
+            if self.main is None:
+                return False
+            p = getattr(self.main, 'player', None)
+            if p is not None and p.is_playing():
+                return True
+            if self.main.isFullScreen():
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _in_cast(self):
+        if self._cast_mode:
+            return True
+        if time.monotonic() < self._cast_override_until:
+            return False
+        return self._playing_now()
+
+    def _cursor_pos(self):
+        return QCursor.pos()
+
+    def _hotzone(self):
+        """观影态下把鼠标顶到屏幕上沿中间区域，可临时唤出控制条。"""
+        try:
+            geo = self._screen_geo()
+            if geo is None:
+                return False
+            pos = self._cursor_pos()
+            # 淡出过程中别再用岛自身矩形判定：岛此刻虽还 visible，
+            # 但鼠标停在上面会把淡出反转成淡入，岛就永远退不下去
+            if self.isVisible() and not (self._fading and self._fade_dir < 0):
+                r = self.geometry().adjusted(-14, -14, 14, 14)
+                if r.contains(pos):
+                    return True
+            band = QRect(geo.left() + geo.width() // 4, geo.top(),
+                         geo.width() // 2, 24)
+            return band.contains(pos)
+        except Exception:
+            return False
+
+    def _desired_visible(self):
+        now = time.monotonic()
+        # 文件传输优先：传文件/完成提示必须弹出，哪怕正在放视频
+        if self._transfer_on or self._transfer_done:
+            return True
+        if now < self._suppress_until:
+            return False
+        if self._in_cast():
+            # 正在淡出就先让它淡完，别被热区当场翻转成淡入
+            if self._fading and self._fade_dir < 0:
+                return False
+            if self._hotzone():
+                self._wake_until = now + 2.5
+                return True
+            return now < self._wake_until
+        # 空闲：常驻前台，主窗口最小化 / 收进托盘也不消失
+        return True
 
     def guard(self):
-        if self._transfer_on:
-            return
         if self.main is None:
             if self.isVisible():
+                self._stop_fade()
                 self.hide()
             return
-        if not self.isVisible():
-            self.show_at_top()
-            return
-        # 屏幕几何（换显示器/改分辨率/DPI）变化时自适应重新居中
+        # 屏幕几何（换显示器 / 改分辨率 / DPI）变化时自适应重新居中
+        # 传输中同样检测，不再 early return
         geo = self._screen_geo()
         if geo is not None:
             key = (geo.x(), geo.y(), geo.width(), geo.height())
             if key != self._geo_key:
                 self._geo_key = key
                 self.reposition()
+        want = self._desired_visible()
+        if want:
+            if not self.isVisible() or (self._fading and self._fade_dir < 0):
+                self.fade_in()
+        else:
+            if self.isVisible() and not (self._fading and self._fade_dir < 0):
+                self.fade_out(hide_after=True)
 
     def set_compact(self, on):
         if self._transfer_on:
@@ -356,7 +451,6 @@ class IslandBar(QWidget):
         for w in (self.name_label, self.state_label, self.time_label,
                   self.vol, self.btn_stop, self.btn_more, self.btn_hide):
             w.setVisible(not on)
-        self._radius = 15 if on else 23
         self.setFixedHeight(30 if on else 46)
         self.reposition()
         self.update()
@@ -364,30 +458,35 @@ class IslandBar(QWidget):
     # ---------- 文件传输模式 ----------
 
     def begin_transfer(self, filename):
+        self._transfer_seq += 1
         self._transfer_on = True
         self._transfer_done = False
         self._compact = False
+        self._suppress_until = 0.0
+        self._wake_until = 0.0
+        # 传输态只留文件名 + 进度条；顺便把上次 compact 藏掉的控件复位，
+        # 避免从观影态起传时残留旧布局
         for w in (self.dot, self.name_label, self.state_label, self.stretch,
                   self.ctrl, self.vol, self.btn_more, self.btn_hide):
             w.setVisible(False)
         self.transfer_box.setVisible(True)
         self.t_name.setText(self._elide(filename, 34))
         self.t_bar.set_value(0)
+        self.t_sub.setStyleSheet(
+            'color:#9a9aa2; font-size:10px; background:transparent;')
         self.t_sub.setText('0%   \u51c6\u5907\u4e2d\u2026')
-        self._radius = 33
         self.setFixedHeight(66)
-        if not self.isVisible():
-            self.setVisible(True)
         self.reposition()
-        try:
-            self.raise_()
-        except Exception:
-            pass
+        # 传输强制弹出：走 fade_in 才能恢复鼠标事件与动画状态机
+        self.fade_in()
         self._opacity = 1.0
         self.update()
 
     def update_transfer(self, filename, percent, speed_text=''):
-        self._transfer_on = True
+        # 完成后又收到乱序进度包 / 上一轮已收尾：重新起一轮，
+        # 否则完成态会一直挂着且 transfer_box 已被隐藏
+        if not self._transfer_on or self._transfer_done:
+            self.begin_transfer(filename)
         self.t_name.setText(self._elide(filename, 34))
         self.t_bar.set_value(percent)
         sub = '%d%%' % int(percent)
@@ -401,29 +500,88 @@ class IslandBar(QWidget):
         base = os.path.basename(filename) or filename
         self.t_name.setText('\u5df2\u5b8c\u6210 \u00b7 ' + self._elide(base, 30))
         self.t_bar.set_value(100)
+        self.t_sub.setStyleSheet(
+            'color:#9a9aa2; font-size:10px; background:transparent;')
         self.t_sub.setText('\u6b63\u5728\u6253\u5f00\u6587\u4ef6\u6240\u5728\u4f4d\u7f6e\u2026')
-        self._radius = 33
         self.setFixedHeight(66)
         self.reposition()
+        self.fade_in()
         self._opacity = 1.0
         self.update()
-        QTimer.singleShot(2400, self._end_transfer)
+        seq = self._transfer_seq
 
-    def _end_transfer(self):
+        def _late():
+            # 2.4s 内窗口可能已被销毁，别让回调在退出时抛一串异常
+            try:
+                self._end_transfer(seq)
+            except Exception:
+                pass
+
+        QTimer.singleShot(2400, _late)
+
+    def fail_transfer(self, filename, reason=''):
+        """接收中断 / 残缺文件：提示失败后自动收起，绝不卡在传输态。"""
+        if not self._transfer_on:
+            self.begin_transfer(filename)
+        self._transfer_done = True
+        base = os.path.basename(filename) or filename
+        self.t_name.setText('\u63a5\u6536\u5931\u8d25 \u00b7 ' + self._elide(base, 28))
+        self.t_bar.set_value(0)
+        self.t_sub.setStyleSheet(
+            'color:#ff8b8b; font-size:10px; background:transparent;')
+        self.t_sub.setText(reason or '\u4f20\u8f93\u4e2d\u65ad\uff0c\u6587\u4ef6\u672a\u4fdd\u5b58')
+        self.setFixedHeight(66)
+        self.reposition()
+        self.fade_in()
+        self._opacity = 1.0
+        self.update()
+        seq = self._transfer_seq
+
+        def _late():
+            try:
+                self._end_transfer(seq)
+            except Exception:
+                pass
+
+        QTimer.singleShot(2600, _late)
+
+    def _end_transfer(self, seq=None):
+        # 旧文件的完成定时器不许掐掉已经开始的新一轮传输
+        if seq is not None and seq != self._transfer_seq:
+            return
         if not self._transfer_on:
             return
         self._transfer_on = False
         self._transfer_done = False
         self.transfer_box.setVisible(False)
+        # 观影态下恢复成紧凑形态，别把整条控制栏糊在视频上
+        compact = self._in_cast()
+        self._compact = compact
         for w in (self.dot, self.name_label, self.state_label, self.stretch,
-                  self.ctrl, self.vol, self.btn_more, self.btn_hide):
+                  self.ctrl, self.vol, self.btn_more, self.btn_hide,
+                  self.time_label, self.btn_stop):
             w.setVisible(True)
-        self._radius = 23
-        self.setFixedHeight(46)
+        if compact:
+            for w in (self.name_label, self.state_label, self.time_label,
+                      self.vol, self.btn_stop, self.btn_more, self.btn_hide):
+                w.setVisible(False)
+            self.setFixedHeight(30)
+        else:
+            self.setFixedHeight(46)
         self.reposition()
         self._opacity = 1.0
         self.update()
-        self.fade_out(hide_after=True)
+        self._wake_until = 0.0
+        if compact:
+            # 观影态：完成提示淡出，并留静默期，防止 guard 立刻把岛拉回来
+            self._suppress_until = time.monotonic() + 3.0
+            self.fade_out(hide_after=True)
+        else:
+            # 空闲态：只收起传输条，胶囊立刻回到常驻，别整条闪一下
+            self._suppress_until = 0.0
+            self.fade_in()
+            self._opacity = 1.0
+            self.update()
 
     @staticmethod
     def _elide(text, maxc):
@@ -446,7 +604,6 @@ class IslandBar(QWidget):
                 except Exception:
                     scr = None
             if scr is None:
-                from PyQt6.QtGui import QCursor
                 scr = QApplication.screenAt(QCursor.pos())
             if scr is None:
                 scr = QApplication.primaryScreen()
@@ -467,7 +624,7 @@ class IslandBar(QWidget):
             if self._transfer_on:
                 w = 460
             elif self._compact:
-                w = 150
+                w = 170
             else:
                 w = min(560, max(460, int((geo.width() if geo else 900) * 0.42)))
             if geo is not None:

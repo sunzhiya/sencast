@@ -26,12 +26,14 @@ class MainWindow(QMainWindow):
     log_signal = pyqtSignal(str)
     upload_progress = pyqtSignal(str, int, str)
     upload_done = pyqtSignal(str, str)
+    upload_fail = pyqtSignal(str, str)
 
     def __init__(self, stack, bridge, info, restart_callback=None):
         super().__init__()
         self.log_signal.connect(self._do_append_log)
         self.upload_progress.connect(self._on_upload_progress)
         self.upload_done.connect(self._on_upload_done)
+        self.upload_fail.connect(self._on_upload_failed)
         self._upload_active = False
         self.stack = stack
         self.bridge = bridge
@@ -928,6 +930,15 @@ class MainWindow(QMainWindow):
             self.btn_play_toggle.setText('▶')
         self.append_log('[状态] %s -> 已同步给手机(TransportState=%s)'
                         % (name, transport))
+        # 播放/暂停/缓冲切换都算观影态；只有明确的停止态才恢复常驻。
+        # 播放器起播时常常先报 PLAYING 再回落 TRANSITIONING/BUFFERING，
+        # 若中间态直接关观影态，岛会在视频播起来后又被拉回来。
+        if getattr(self, 'island', None) is not None:
+            if name in ('PLAYING', 'PAUSED', 'TRANSITIONING', 'BUFFERING'):
+                self.island.set_cast_mode(True)
+            elif name in ('STOPPED', 'NO_MEDIA', 'IDLE', ''):
+                self.island.set_cast_mode(False)
+            # 其余未知状态保持现状，不抢状态机
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
@@ -1200,7 +1211,7 @@ class MainWindow(QMainWindow):
             pass
         try:
             self.island.reposition()
-            self.island.fade_in()
+            self.island.guard()
         except Exception:
             pass
         if self.cfg.get('dlss_enabled') and self._dlss_supported():
@@ -1412,17 +1423,22 @@ class MainWindow(QMainWindow):
         self.state_label.setText('状态: 空闲')
         self.append_log('停止')
         self._island_show()
+        # 停止后无条件退出观影态，不等播放器异步状态回落
+        if getattr(self, 'island', None) is not None:
+            self.island.set_cast_mode(False)
 
     def _island_auto_hide(self):
+        """进入观影态：岛由状态机自动淡出，不再抢着 fade_in。"""
         try:
             if getattr(self, 'island', None) is not None:
-                self.island.set_compact(True)
-                self.island.fade_in()
+                self.island.set_cast_mode(True)
             if getattr(self, 'progress_bar', None) is not None:
                 self.progress_bar.hide()
             if getattr(self, 'log_dock', None) is not None:
                 self.log_dock.hide()
-            self.setCursor(Qt.CursorShape.BlankCursor)
+            # 只有全屏观影才藏鼠标；窗口模式播放时别把光标弄丢
+            if self.isFullScreen():
+                self.setCursor(Qt.CursorShape.BlankCursor)
         except Exception:
             pass
 
@@ -1430,9 +1446,12 @@ class MainWindow(QMainWindow):
         try:
             self.unsetCursor()
             if getattr(self, 'island', None) is not None:
-                self.island.set_compact(False)
-                self.island.reposition()
-                self.island.fade_in()
+                if self.player.is_playing():
+                    # 退出全屏但还在播：保持隐藏，别把岛糊回画面上
+                    self.island.set_cast_mode(True)
+                else:
+                    self.island.set_cast_mode(False)
+                    self.island.guard()
             if getattr(self, 'progress_bar', None) is not None:
                 self.progress_bar.show()
             if getattr(self, 'log_dock', None) is not None:
@@ -1461,6 +1480,16 @@ class MainWindow(QMainWindow):
         self._reveal_file(saved_path)
         self.append_log('[文件] 已接收并保存: %s' % saved_path)
 
+    def _on_upload_failed(self, name, reason):
+        # 中断 / 残缺文件：不放行、不打开资源管理器，灵动岛也要收起
+        self._upload_active = False
+        try:
+            if getattr(self, 'island', None) is not None:
+                self.island.fail_transfer(name, reason)
+        except Exception:
+            pass
+        self.append_log('[文件] 接收失败: %s (%s)' % (name, reason))
+
     @staticmethod
     def _reveal_file(path):
         try:
@@ -1483,29 +1512,21 @@ class MainWindow(QMainWindow):
             self.raise_()
             self.activateWindow()
             if getattr(self, 'island', None) is not None:
-                self.island.show_at_top()
+                self.island.wake(3.0)
         except Exception:
             pass
 
     def enterEvent(self, ev):
+        # 显隐统一由 island.guard() 决定，这里只负责把光标找回来
         try:
-            if getattr(self, 'island', None) is not None and self.player.is_playing():
-                self.island.set_compact(False)
-                self.island.reposition()
-                self.island.fade_in()
-                self.setCursor(Qt.CursorShape.ArrowCursor)
+            if self.isFullScreen():
+                self.unsetCursor()
         except Exception:
             pass
         super().enterEvent(ev)
 
     def leaveEvent(self, ev):
-        try:
-            if getattr(self, 'island', None) is not None and self.player.is_playing():
-                if not self.island.underMouse():
-                    self.island.set_compact(True)
-                self.setCursor(Qt.CursorShape.BlankCursor)
-        except Exception:
-            pass
+        # 不再直接 set_compact / 藏光标，避免和观影态状态机打架
         super().leaveEvent(ev)
 
     def resizeEvent(self, ev):
@@ -1525,9 +1546,10 @@ class MainWindow(QMainWindow):
             pass
 
     def hideEvent(self, ev):
+        # 收进托盘 / 最小化时岛必须常驻，绝不能在这里 hide
         try:
             if getattr(self, 'island', None) is not None:
-                self.island.hide()
+                self.island.guard()
         except Exception:
             pass
         super().hideEvent(ev)
@@ -1536,27 +1558,21 @@ class MainWindow(QMainWindow):
         super().showEvent(ev)
         try:
             if getattr(self, 'island', None) is not None:
-                self.island.show_at_top()
+                self.island.guard()
                 from PyQt6.QtCore import QTimer as _T
-                _T.singleShot(120, self.island.show_at_top)
+                _T.singleShot(120, self.island.guard)
         except Exception:
             pass
 
     def changeEvent(self, ev):
         from PyQt6.QtCore import QEvent
         try:
-            if ev.type() == QEvent.Type.ActivationChange:
-                if self.isActiveWindow():
-                    if getattr(self, 'island', None) is not None:
-                        self.island.show_at_top()
-                        from PyQt6.QtCore import QTimer as _T
-                        _T.singleShot(150, self.island.reposition)
-            elif ev.type() == QEvent.Type.WindowStateChange:
+            if ev.type() in (QEvent.Type.ActivationChange,
+                             QEvent.Type.WindowStateChange):
                 if getattr(self, 'island', None) is not None:
-                    if self.isMinimized():
-                        self.island.hide()
-                    else:
-                        self.island.show_at_top()
+                    self.island.guard()
+                    from PyQt6.QtCore import QTimer as _T
+                    _T.singleShot(150, self.island.reposition)
         except Exception:
             pass
         super().changeEvent(ev)
